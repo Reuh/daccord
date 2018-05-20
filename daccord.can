@@ -1,0 +1,342 @@
+--- Yet another MPD client, but this time I wrote it so it's the best.
+-- Focused on an instant and hopefully powerful search.
+-- Currently only a console interface is available.
+--
+-- Dependencies: candran, luasocket, lcurses
+--
+-- Highly unintuitive keybinding:
+-- * Up goes up, down goes down.
+-- * Tab switch between search and current playlist.
+-- * Control+W quits.
+-- * Control+Space toggle play/pause.
+-- * In search:
+--   * Control+A add all the results to the playlist.
+--   * Enter add currently selected song to the playlist.
+--   * Type "TagName=" to trigger tag completion: select a tag and press Enter to select it. Or type it manually and exit tag completion by typing a space.
+-- * In current playlist:
+--   * Enter play currently selected song.
+--   * Delete remove selected song from playlist.
+--
+-- Most of what was initialy planned isn't implemented yet. Hopefully all will be finished before you're six feet under.
+--
+-- Curently implemented:
+-- * Play/pause, current song status
+-- * Current playlist, jump to song, remove song
+-- * Instant search among all tags or specific tags
+-- * Instant tag value completion
+-- * Overly optimistic planned features list in a comment in the main file
+--
+-- Stuff which is planned:
+-- * Sticker search
+-- * Search requests where keyword and tag selectors can be assigned with a $probabilty, generating infinite playlists (composer=chopin$.5)
+-- * Relational operators for tags and stickers (song ratings) (rating>.5)
+-- * Random, single, consume and other MPD play mode are determined by :keywords in the search query (:rand, :limit=5, :asc=Track, etc.)
+-- * The endgoal would be that playlists would be entirely determined and contained in a single search query (add some saved storage interface).
+--   Which we would therfore mean we can regenerate them on the fly when the MPD database is updated, or probabilities where used in the query.
+-- * A non-console GUI. Should be doable considering everything is neatly contained in gui.can, but damn are thoses text widget I made weird.
+--
+-- This version of the software is licensed under the terms of the Apache License, version 2 (https://www.apache.org/licenses/LICENSE-2.0.txt).
+
+-- Copyright 2017-2018 Étienne "Reuh" Fildadut
+--
+-- Licensed under the Apache License, Version 2.0 (the "License");
+-- you may not use this file except in compliance with the License.
+-- You may obtain a copy of the License at
+--
+--     http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing, software
+-- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
+
+require("candran").setup()
+let gui = require("gui")
+let mpc = require("mpc")
+
+-- Constants
+let VERSION = "0.0.3"
+
+-- Configuration
+let config = {
+	-- MPD server
+	host = "localhost",
+	port = 6600,
+	password = "",
+	-- Interface
+	songDisplay = { "Track", { "Title", "file" }, "Artist", "Album" } -- list of tags or list of alternative tags (first one to exist will be used) to display for each song
+}
+(loadfile("config.lua", "t", config) or () end)()
+
+-- Returns list of fields to display for the song s
+let songTable = (s)
+	let t = {}
+	for i, field in ipairs(config.songDisplay) do
+		if type(field) ~= "table" then field = { field } end
+		t[i] = "∅"
+		for _, option in ipairs(field) do
+			if s[option] then
+				t[i] = tostring(s[option])
+				break
+			end
+		end
+	end
+	return t
+end
+
+-- Connect
+mpc.log = () end
+mpc = mpc("localhost", 6600)
+if config.password ~= "" then
+	mpc:password(config.password)
+end
+
+-- Valid tags list
+let tags = [
+	let r, l = mpc:tagtypes()
+	for _, t in ipairs(l) do
+		push t.tagtype
+	end
+]
+table.insert(tags, "file")
+
+-- State
+let tagCompleting = {
+	tag = nil,
+	start = nil,
+	stop = nil
+}
+
+let results, playlist = {}, {}
+let state = "stop"
+
+gui {
+		{
+			type = "tabs",
+			focused = true,
+
+			width = "extend",
+			height = "extend",
+
+			-- Search
+			{
+				{
+					id = "prompt",
+
+					type = "input",
+					focused = true,
+
+					width = "extend",
+					height = "1em",
+
+					onTextInput = :()
+						let list = @byId("list")
+						list:clear()
+
+						-- Tag complete
+						tagCompleting.tag = nil
+						if @sub(1, @cursorPosition):match("[A-Za-z_]+=[^\" ]*$") or @sub(1, @cursorPosition):match("[A-Za-z_]+=\"[^\"]*$") then
+							let start, sel, val, stop
+							if @sub(1, @cursorPosition):match("[A-Za-z_]+=[^\" ]*$") then
+								start, sel, val, stop = @sub(1, @cursorPosition):match("()([A-Za-z_]+)=([^\" ]*)()$")
+							else
+								start, sel, val, stop = @sub(1, @cursorPosition):match("()([A-Za-z_]+)=\"([^\"]*)()$")
+							end
+
+							for _, tag in ipairs(tags) do
+								if tag:lower() == sel:lower() then
+									let r, songs = mpc:list(tag)
+									if r then results = songs end
+
+									for _, s in ipairs(results) do
+										if s[tag]:lower():match(val:lower()) then -- filter val
+											list:insert{tostring(s[tag])}
+										end
+									end
+
+									tagCompleting.tag = tag
+									tagCompleting.start = start
+									tagCompleting.stop = stop
+
+									break
+								end
+							end
+						-- Song search
+						else
+							-- Build query
+							let query = {}
+
+							-- Any selectors
+							let withoutSel = @content:gsub("[A-Za-z_]+=[^\" ]+", ""):gsub("[A-Za-z_]+=\"[^\"]*\"", "")
+							for word in withoutSel:gmatch("[^%s]+") do
+								table.insert(query, "any")
+								table.insert(query, word)
+							end
+
+							-- Tag selectors
+							for tag, val in @content:gmatch("([A-Za-z_]+)=([^\" ]+)") do
+								table.insert(query, tag)
+								table.insert(query, val)
+							end
+							for tag, val in @content:gmatch("([A-Za-z_]+)=\"([^\"]*)\"") do
+								table.insert(query, tag)
+								table.insert(query, val)
+							end
+
+							-- Search
+							let r, songs = mpc:search(unpack(query))
+							if r then results = songs end
+
+							-- Update widget
+							for _, s in ipairs(results) do
+								list:insert(songTable(s))
+							end
+						end
+					end
+				},
+				{
+					type = "fill",
+
+					width = "extend",
+					height = "1em",
+
+					fill = "ACS_HLINE"
+				},
+				{
+					id = "list",
+
+					type = "list",
+					focused = true,
+
+					width = "extend",
+					height = "extend",
+
+					onSelect = :(l)
+						-- Tag complete
+						if tagCompleting.tag then
+							let prompt = @byId("prompt")
+							if results[l[1]][tagCompleting.tag]:match(" ") then
+								prompt:replace(tagCompleting.start, tagCompleting.stop, tagCompleting.tag.."=\""..results[l[1]][tagCompleting.tag].."\"")
+							else
+								prompt:replace(tagCompleting.start, tagCompleting.stop, tagCompleting.tag.."="..results[l[1]][tagCompleting.tag])
+							end
+						-- Song search
+						else
+							for _, i in ipairs(l) do
+								if results[i] then
+									mpc:add(results[i].file)
+								end
+							end
+							@byId("playlist"):updateAfter(1)
+
+							let status = @byId("status")
+							status:set("Added "..#l.." songs to the current playlist") -- FIXME
+						end
+					end
+				}
+			},
+
+			-- Playlist
+			{
+				{
+					id = "playlist",
+
+					type = "list",
+					focused = true,
+
+					width = "extend",
+					height = "extend",
+
+					updateInterval = 5,
+
+					onUpdate = :()
+						let r, songs = mpc:playlistinfo()
+						if r then playlist = songs end
+
+						for i, s in ipairs(playlist) do
+							let item = songTable(s)
+							if @content[i] then
+								if @content[i] ~= item then
+									@remove(i)
+									@insert(i, item)
+								end
+							else
+								@insert(i, item)
+							end
+						end
+
+						while #@content > #playlist do
+							@remove()
+						end
+					end,
+
+					onSelect = :(l)
+						if #playlist > 0 then
+							mpc:playid(playlist[l[1]].Id)
+						end
+					end,
+
+					onControl = :(control)
+						if control == "delete" then
+							mpc:deleteid(playlist[@selected].Id)
+							@remove(@selected)
+						end
+					end
+				}
+			}
+		},
+		-- Status bar
+		{
+			id = "play-position",
+			type = "slider",
+
+			width = "extend",
+			height = "1em"
+		},
+		{
+			id = "status",
+			type = "label",
+			focused = true,
+
+			width = "extend",
+			height = "1em",
+
+			content = "No current song",
+
+			updateInterval = 1,
+
+			onUpdate = :()
+				let r, s = mpc:currentsong()
+				if r then
+					if s.file then
+						@set(table.concat(songTable(s), " - "))
+					else
+						@set("daccord v"..VERSION.." - nothing playing")
+					end
+				end
+
+				let r, s = mpc:status()
+				if r then
+					state = s.state
+					pos = @byId("play-position")
+					pos:setHead(state == "play" and "▶️" or "⏸")
+					pos:setMax(s.duration)
+					pos:set(s.elapsed)
+				end
+			end,
+
+			onControl = :(control)
+				if control == "space" then
+					if state == "play" then
+						mpc:pause()
+					else
+						mpc:play()
+					end
+				end
+				@onUpdate()
+			end
+		},
+
+		onClose = :() @exit() end
+}

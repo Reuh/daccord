@@ -1,0 +1,493 @@
+--- Yet another badly designed and implemented GUI library, but this time I wrote it so it's the best.
+-- Part of daccord. See daccord.can for more information.
+
+-- Copyright 2017-2018 Étienne "Reuh" Fildadut
+--
+-- Licensed under the Apache License, Version 2.0 (the "License");
+-- you may not use this file except in compliance with the License.
+-- You may obtain a copy of the License at
+--
+--     http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing, software
+-- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
+
+let curses = require("curses")
+let class = require("classtoi")
+let sleep = require("socket").sleep
+
+let screen
+
+os.setlocale("")
+
+let everyWidget = {}
+
+let widget = class {
+	_exit = false,
+
+	_redraw = true,
+	x = 0,
+	y = 0,
+	w = 0,
+	h = 0,
+
+	parent = {},
+	focused = false,
+
+	updateInterval = -1,
+	_nextUpdate = os.time(), -- -1 = no update
+
+	new = :(data)
+		table.insert(everyWidget, self)
+
+		-- Copy properties
+		for k, v in pairs(data) do
+			@[k] = v
+		end
+
+		-- Dimensions
+		if not @parent._firstX then @parent._firstX, @parent._firstY = 0, 0 end
+		@x, @y = @parent._firstX, @parent._firstY
+
+		if     @width == "extend" @w = @parent.w - @x
+		elseif @width:match("%d+em$") @w = tonumber(@width:match("%d+"))
+		if     @height == "extend" then
+			@h = @parent.h - @y
+			@parent._lastVerticalExtend = self -- will be resized if vertical space is needed
+			@parent._afterLastVerticalExtend = {}
+		elseif @height:match("%d+em$") @h = tonumber(@height:match("%d+"))
+
+		if @y >= @parent.h then -- resize
+			@parent._lastVerticalExtend:_resize(@parent._lastVerticalExtend.w, @parent._lastVerticalExtend.h - @h)
+			@parent._firstY -= @h
+			@y -= @h
+			for _, el in ipairs(@parent._afterLastVerticalExtend) do -- move widgets
+				el.y -= @h
+			end
+		end
+
+		@parent._firstX += @w
+		if @parent._firstX >= @parent.w then @parent._firstX = 0 end -- newline
+		@parent._firstY += @h
+		if @parent._lastVerticalExtend ~= self and @parent._afterLastVerticalExtend then table.insert(@parent._afterLastVerticalExtend, self) end
+
+		-- Setup
+		if @_setup then @_setup() end
+
+		screen:move(@parent.y + @y + @h, @parent.x + @x + @w)
+	end,
+
+	exit = :()
+		@_exit = true
+	end,
+
+	byId = :(id)
+		for _, el in ipairs(everyWidget) do
+			if el.id == id return el
+		end
+		error("no element with id "..tostring(id))
+	end,
+
+	updateAfter = :(time)
+		@_nextUpdate = os.time() + time
+	end
+}
+
+let widgets = setmetatable({
+	fill = widget {
+		_draw = :()
+			if type(@fill) == "string" then @fill = curses[@fill] end
+			for y = @parent.y + @y, @parent.y + @y + @h - 1 do
+				screen:move(y, @parent.x + @x)
+				for x = @parent.x + @x, @parent.x + @x + @w - 1 do
+					screen:addch(@fill or 32)
+				end
+			end
+		end
+	},
+
+	input = widget {
+		content = "",
+		cursorPosition = 1,
+		_input = :(charbuffer, control)
+			let y, x = @parent.y + @y, @parent.x + @x + @cursorPosition-1
+			if control == "backspace" then
+				screen:mvdelch(y, x-1)
+				if @cursorPosition > 1 then
+					if @cursorPosition == 2 then -- utf8.offset(s, 0) returns the start of the last character, ie something we don't want
+						@content = @content:sub(utf8.offset(@content, @cursorPosition))
+					else
+						@content = @content:sub(1, utf8.offset(@content, @cursorPosition-1)-1)
+									.. @content:sub(utf8.offset(@content, @cursorPosition))
+					end
+					@cursorPosition -= 1
+					@onTextInput()
+				end
+			elseif control == "right" then
+				if @cursorPosition <= utf8.len(@content) then
+					screen:addstr(@content:sub(utf8.offset(@content, @cursorPosition), utf8.offset(@content, @cursorPosition+1)-1))
+					@cursorPosition += 1
+				end
+			elseif control == "left" then
+				if @cursorPosition > 1 then
+					screen:move(y, x-1)
+					@cursorPosition -= 1
+				end
+			elseif charbuffer then
+				screen:move(y, x)
+				screen:winsstr(charbuffer)
+				screen:move(y, x+1)
+				@content = @content:sub(1, utf8.offset(@content, @cursorPosition)-1)
+								.. charbuffer
+								.. @content:sub(utf8.offset(@content, @cursorPosition))
+				@cursorPosition += 1
+				@onTextInput()
+			end
+		end,
+		_draw = :()
+			for y = @parent.y + @y, @parent.y + @y + @h - 1 do
+				screen:move(y, @parent.x + @x)
+				for x = @parent.x + @x, @parent.x + @x + @w - 1 do
+					screen:addch(32)
+				end
+			end
+			screen:mvaddstr(@parent.y + @y, @parent.x + @x, @content)
+		end,
+		_placeCursor = :()
+			screen:move(@parent.y + @y, @parent.x + @x + @cursorPosition-1)
+			return true
+		end,
+		sub = :(start, stop=utf8.len(@content))
+			if stop < 1 or start >= utf8.len(@content) then
+				return ""
+			else
+				return @content:sub(utf8.offset(@content, start), (utf8.offset(@content, stop+1) or (#@content+1))-1)
+			end
+		end,
+		replace = :(start, stop, newText)
+			if @cursorPosition >= stop then
+				@cursorPosition += utf8.len(newText) - (stop - start)
+			end
+			@content = @sub(1, start-1) .. newText .. @sub(stop+1)
+			@onTextInput()
+			@_redraw = true
+		end,
+		onTextInput = :() end
+	},
+
+	list = widget {
+		content = {},
+		columnWidth = {},
+		selected = 1,
+		scroll = 0,
+		_redraw = true,
+		_input = :(charbuffer, control)
+			if control == "up" and @selected > 1 then
+				@selected -= 1
+				if @selected == @scroll then
+					@scroll -= 1
+				end
+				@_redraw = true
+			elseif control == "down" and @selected < #@content then
+				@selected += 1
+				if @selected == @scroll + @h + 1 then
+					@scroll += 1
+				end
+				@_redraw = true
+			end
+
+			if control == "enter" then
+				@onSelect({@selected})
+			elseif control == "A" then
+				let len = #@content
+				@onSelect([for i=1, len do i end])
+			end
+		end,
+		_draw = :()
+			let oY, oX = screen:getyx()
+			for y = @parent.y + @y, @parent.y + @y + @h -1 do -- clear
+				screen:mvaddstr(y, @parent.x + @x, (" "):rep(@w))
+			end
+			screen:move(@parent.y + @y, @parent.x + @x)
+			for i=@scroll+1, @scroll + @h do -- draw
+				if i == @selected then
+					screen:standout()
+				end
+				let colx = @parent.x+@x
+				for c=1, #@columnWidth do
+					screen:mvaddstr(@parent.y+@y+i-1-@scroll, colx, (""):rep(@columnWidth[c])) -- FIXME: too lazy to do this the right way and extract utf8 substrings (also should probably check if the thing doesn't go too right)
+					screen:mvaddstr(@parent.y+@y+i-1-@scroll, colx, @content[i] and @content[i][c] or "")
+					colx += @columnWidth[c]
+				end
+				if i == @selected then
+					screen:standend()
+				end
+			end
+			screen:move(oY, oX)
+		end,
+		insert = :(pos, item)
+			if item then
+				table.insert(@content, pos, item)
+				if @selected >= pos and #@content > 1 then
+					@selected += 1
+				end
+			else
+				item = pos
+				table.insert(@content, item)
+			end
+			if #@content == 1 then -- column count is determined by 1st item (other items can do what they want, this isn't a dictatorship)
+				@columnWidth = [for _=1,#item do 0 end]
+			end
+			if #item >= #@columnWidth then -- if the column fits into our dictatorship, update column width
+				for c=1, #@columnWidth do
+					if utf8.len(item[c]) > @columnWidth[c] then
+						@columnWidth[c] = utf8.len(item[c]) + 1
+					end
+				end
+			end
+			@_redraw = true
+		end,
+		remove = :(pos=#@content)
+			table.remove(@content, pos)
+			if @selected >= pos and @selected > 1 then
+				@selected -= 1
+			end
+			@_redraw = true
+		end,
+		clear = :()
+			@.content = {}
+			--@.columnWidth = {}
+			@_redraw = true
+			@selected = 1
+			@scroll = 0
+		end,
+		onSelect = :() end
+	},
+
+	tabs = widget {
+		selected = 1,
+		children = {},
+		_children = {},
+		_setup = :()
+			for i, tab in ipairs(@) do
+				@children[i] = { x = @x, y = @y, w = @w, h = @h }
+				for _, el in ipairs(tab) do
+					el.parent = @children[i]
+					table.insert(@children[i], widgets[el.type]:new(el))
+				end
+			end
+			@_children = @children[@selected]
+		end,
+		_input = :(charbuffer, control)
+			if control == "tab" then
+				@selected += 1
+				if @selected > #@ then @selected = 1 end
+				@_children = @children[@selected]
+				for _, el in ipairs(@_children) do -- Force redraw
+					el._redraw = true
+				end
+			end
+		end,
+		_resize = :(w, h)
+			@w, @h = w, h
+			for i, tab in ipairs(@) do
+				for _, el in ipairs(@children[i]) do
+					if el.x + el.w > w then el.w = w - el.x end
+					if el.y + el.h > h then el.h = h - el.y end
+				end
+			end
+		end
+	},
+
+	label = widget {
+		content = "Label",
+		_draw = :()
+			screen:mvaddstr(@parent.y + @y, @parent.x + @x, @content .. (" "):rep(@w - #@content))
+		end,
+		set = :(str)
+			@content = str
+			@_redraw = true
+		end
+	},
+
+	slider = widget {
+		min = 0,
+		max = 1,
+		current = 0,
+		head = "⏸",
+		_draw = :()
+			let len = math.ceil((@current - @min) / (@max - @min) * @w)
+			screen:mvaddstr(@parent.y + @y, @parent.x + @x, ("="):rep(len-1))
+			screen:addstr(@head .. (" "):rep(@w - len))
+		end,
+		set = :(current)
+			@current = current
+			@_redraw = true
+		end,
+		setMax = :(max)
+			@max = max
+			@_redraw = true
+		end,
+		setMin = :(min)
+			@min = min
+			@_redraw = true
+		end,
+		setHead = :(head)
+			@head = head
+			@_redraw = true
+		end
+	}
+}, {
+	__index = (t, k)
+		error("unknown widget "..tostring(k))
+	end
+})
+
+let recursiveApply = (list, fn)
+	for _, el in ipairs(list) do
+		if el._widget then
+			el = el._widget
+		end
+		fn(el)
+		if el._children then
+			recursiveApply(el._children, fn)
+		end
+	end
+end
+
+return (ui)
+	xpcall(()
+		-- Init
+		if not screen then
+			screen = curses.initscr()
+			curses.cbreak()
+			curses.echo(false)
+			screen:nodelay(true)
+		end
+
+		-- Create widgets
+		screen:clear()
+		let h, w = screen:getmaxyx()
+		let parent = {
+			x = 0, y = 0,
+			w = w, h = h
+		}
+		for _, el in ipairs(ui) do
+			el.parent = parent
+			el._widget = widgets[el.type]:new(el)
+		end
+
+		-- Update loop
+		while not widget._exit do
+			-- Input
+			local c = screen:getch()
+			if c and c < 256 then
+				let charbuffer = string.char(c)
+				let control
+				if c > 127 then -- multibyte char
+					charbuffer ..= string.char(screen:getch())
+					if c > 223 then
+						charbuffer ..= string.char(screen:getch())
+						if c > 239 then
+							charbuffer ..= string.char(screen:getch())
+						end
+					end
+				end
+				if curses.unctrl(c):match("^%^") then -- control char
+					charbuffer = nil
+					let k = curses.unctrl(c)
+					if k == "^?" then
+						control = "backspace"
+					elseif k == "^W" then
+						control = "close"
+					elseif k == "^J" then
+						control = "enter"
+					elseif k == "^I" then
+						control = "tab"
+					elseif k == "^@" then
+						control = "space"
+					elseif k == "^[" then
+						let k = string.char(screen:getch()) .. string.char(screen:getch())
+						if k == "[C" then
+							control = "right"
+						elseif k == "[D" then
+							control = "left"
+						elseif k == "[A" then
+							control = "up"
+						elseif k == "[B" then
+							control = "down"
+						elseif k == "[3" then
+							k ..= string.char(screen:getch())
+							if k == "[3~" then
+								control = "delete"
+							else
+								error("unknown control "..tostring(k))
+							end
+						else
+							error("unknown control "..tostring(k))
+						end
+					elseif k:match("^%^[A-Z]$") then
+						control = k:match("^%^([A-Z])$")
+					else
+						error("unknown control "..tostring(k))
+					end
+				end
+
+				recursiveApply(ui, (el)
+					if el.focused and el._input then
+						el:_input(charbuffer, control)
+					end
+					if el.focused and control and el.onControl then
+						el:onControl(control)
+					end
+				end)
+
+				if control == "close" then
+					if ui.onClose then ui.onClose(widget) end
+				end
+			end
+
+			-- Update
+			recursiveApply(ui, (el)
+				if el._nextUpdate ~= -1 and os.difftime(el._nextUpdate, os.time()) <= 0 then
+					if el.onUpdate then el:onUpdate() end
+					if el.updateInterval ~= -1 then
+						el._nextUpdate += el.updateInterval
+					else
+						el._nextUpdate = -1
+					end
+				end
+			end)
+
+			-- Redraw
+			recursiveApply(ui, (el)
+				if el._redraw and el._draw then
+					el._redraw = false
+					el:_draw()
+				end
+			end)
+
+			-- Place cursor
+			let cursorVis = 0
+			recursiveApply(ui, (el)
+				if el._placeCursor and el:_placeCursor() then
+					cursorVis = 2
+				end
+			end)
+			curses.curs_set(cursorVis)
+
+			-- Done
+			screen:refresh()
+			sleep(0.03)
+		end
+
+		curses.endwin()
+	end, (err)
+	  curses.endwin()
+	  print(require("candran").messageHandler(err))
+	  os.exit(2)
+	end)
+end
