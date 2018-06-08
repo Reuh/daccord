@@ -64,6 +64,8 @@ let config = {
 	host = "localhost",
 	port = 6600,
 	password = "",
+	-- Default behaviour
+	filenameSearch = false, -- instant search search also in filename (not only tags), slower
 	-- Interface
 	songDisplay = { "Track", { "Title", "file" }, "Artist", "Album" } -- list of tags or list of alternative tags (first one to exist will be used) to display for each song
 }
@@ -187,6 +189,32 @@ gui {
 							-- Search
 							let r, songs = mpc:search(unpack(query))
 							if r then results = songs end
+
+							-- Filename search
+							if config.filenameSearch then
+								for i=1, #query, 2 do
+									if query[i] == "any" then
+										query[i] = "file"
+									end
+								end
+
+								let r, songs = mpc:search(unpack(query))
+								if r then
+									-- Merge
+									for _, newSong in ipairs(songs) do
+										let found = false
+										for _, existingSong in ipairs(results) do
+											if newSong.file == existingSong.file then
+												found = true
+												break
+											end
+										end
+										if not found then
+											table.insert(results, newSong)
+										end
+									end
+								end
+							end
 
 							-- Update widget
 							for _, s in ipairs(results) do
