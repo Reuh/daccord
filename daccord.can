@@ -13,9 +13,11 @@
 --   * Control+A add all the results to the playlist.
 --   * Enter add currently selected song to the playlist.
 --   * Type "TagName=" to trigger tag completion: select a tag and press Enter to select it. Or type it manually and exit tag completion by typing a space.
+--   * Type "File=" to trigger filename search.
 -- * In current playlist:
 --   * Enter play currently selected song.
 --   * Delete remove selected song from playlist.
+--   * Control+Delete clear the playlist.
 --
 -- Most of what was initialy planned isn't implemented yet. Hopefully all will be finished before you're six feet under.
 --
@@ -65,7 +67,7 @@ let config = {
 	port = 6600,
 	password = "",
 	-- Default behaviour
-	filenameSearch = false, -- instant search search also in filename (not only tags), slower
+	filenameSearch = false, -- instant search search also in filename (not only when using the file= syntax), slower
 	-- Interface
 	songDisplay = { "Track", { "Title", "file" }, "Artist", "Album" } -- list of tags or list of alternative tags (first one to exist will be used) to display for each song
 }
@@ -89,7 +91,7 @@ end
 
 -- Connect
 mpc.log = () end
-mpc = mpc("localhost", 6600)
+mpc = mpc(config.host, config.port)
 if config.password ~= "" then
 	mpc:password(config.password)
 end
@@ -101,7 +103,6 @@ let tags = [
 		push t.tagtype
 	end
 ]
-table.insert(tags, "file")
 
 -- State
 let tagCompleting = {
@@ -146,14 +147,17 @@ gui {
 								start, sel, val, stop = @sub(1, @cursorPosition):match("()([A-Za-z_]+)=\"([^\"]*)()$")
 							end
 
+							-- music tags
 							for _, tag in ipairs(tags) do
 								if tag:lower() == sel:lower() then
 									let r, songs = mpc:list(tag)
-									if r then results = songs end
-
-									for _, s in ipairs(results) do
-										if s[tag]:lower():match(val:lower()) then -- filter val
-											list:insert{tostring(s[tag])}
+									if r then
+										results = {}
+										for _, s in ipairs(songs) do
+											if s[tag]:lower():match(val:lower()) then -- filter val
+												table.insert(results, s)
+												list:insert{tostring(s[tag])}
+											end
 										end
 									end
 
@@ -163,6 +167,23 @@ gui {
 
 									break
 								end
+							end
+							-- file search
+							if sel:lower() == "file" then
+								let r, songs = mpc:list("file")
+								if r then
+									results = {}
+									for _, s in ipairs(songs) do
+										if s.file:lower():match(val:lower()) then -- filter val
+											table.insert(results, s)
+											list:insert{tostring(s.file)}
+										end
+									end
+								end
+
+								tagCompleting.tag = "file"
+								tagCompleting.start = start
+								tagCompleting.stop = stop
 							end
 						-- Song search
 						else
@@ -285,10 +306,7 @@ gui {
 						for i, s in ipairs(playlist) do
 							let item = songTable(s)
 							if @content[i] then
-								if @content[i] ~= item then
-									@remove(i)
-									@insert(i, item)
-								end
+								@replace(i, item)
 							else
 								@insert(i, item)
 							end
@@ -309,6 +327,9 @@ gui {
 						if control == "delete" then
 							mpc:deleteid(playlist[@selected].Id)
 							@remove(@selected)
+						elseif control == "clear" then
+							mpc:clear()
+							@clear()
 						end
 					end
 				}

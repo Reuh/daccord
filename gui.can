@@ -126,6 +126,17 @@ let widgets = setmetatable({
 					@cursorPosition -= 1
 					@onTextInput()
 				end
+			elseif control == "delete" then
+				screen:mvdelch(y, x)
+				if @cursorPosition <= utf8.len(@content) then
+					if @cursorPosition == 1 then -- utf8.offset(s, 0) returns the start of the last character, ie something we don't want
+						@content = @content:sub(utf8.offset(@content, @cursorPosition+1))
+					else
+						@content = @content:sub(1, utf8.offset(@content, @cursorPosition)-1)
+									.. @content:sub(utf8.offset(@content, @cursorPosition+1))
+					end
+					@onTextInput()
+				end
 			elseif control == "right" then
 				if @cursorPosition <= utf8.len(@content) then
 					screen:addstr(@content:sub(utf8.offset(@content, @cursorPosition), utf8.offset(@content, @cursorPosition+1)-1))
@@ -185,18 +196,26 @@ let widgets = setmetatable({
 		scroll = 0,
 		_redraw = true,
 		_input = :(charbuffer, control)
-			if control == "up" and @selected > 1 then
+			if control == "up" then
 				@selected -= 1
-				if @selected == @scroll then
-					@scroll -= 1
-				end
 				@_redraw = true
-			elseif control == "down" and @selected < #@content then
+			elseif control == "down" then
 				@selected += 1
-				if @selected == @scroll + @h + 1 then
-					@scroll += 1
-				end
 				@_redraw = true
+			elseif control == "pgup" then
+				@selected -= 10
+				@_redraw = true
+			elseif control == "pgdown" then
+				@selected += 10
+				@_redraw = true
+			end
+			@selected = math.min(math.max(@selected, 1), math.max(#@content, 1))
+
+			while @selected <= @scroll do
+				@scroll -= 1
+			end
+			while @selected >= @scroll + @h + 1 do
+				@scroll += 1
 			end
 
 			if control == "enter" then
@@ -218,8 +237,7 @@ let widgets = setmetatable({
 				end
 				let colx = @parent.x+@x
 				for c=1, #@columnWidth do
-					screen:mvaddstr(@parent.y+@y+i-1-@scroll, colx, (""):rep(@columnWidth[c])) -- FIXME: too lazy to do this the right way and extract utf8 substrings (also should probably check if the thing doesn't go too right)
-					screen:mvaddstr(@parent.y+@y+i-1-@scroll, colx, @content[i] and @content[i][c] or "")
+					screen:mvaddstr(@parent.y+@y+i-1-@scroll, colx, @content[i] and @content[i][c] or "") -- TODO: make sure it doesn't go too far right or something
 					colx += @columnWidth[c]
 				end
 				if i == @selected then
@@ -231,7 +249,7 @@ let widgets = setmetatable({
 		insert = :(pos, item)
 			if item then
 				table.insert(@content, pos, item)
-				if @selected >= pos and #@content > 1 then
+				if @selected > pos and @selected < #@content then
 					@selected += 1
 				end
 			else
@@ -243,7 +261,8 @@ let widgets = setmetatable({
 			end
 			if #item >= #@columnWidth then -- if the column fits into our dictatorship, update column width
 				for c=1, #@columnWidth do
-					if utf8.len(item[c]) > @columnWidth[c] then
+					let l = utf8.len(item[c]) -- if it isn't valid UTF8, ignore (can happen for files in Windows-made zipfiles). Should probably raise a warning or something... TODO.
+					if l and l > @columnWidth[c] then
 						@columnWidth[c] = utf8.len(item[c]) + 1
 					end
 				end
@@ -252,14 +271,19 @@ let widgets = setmetatable({
 		end,
 		remove = :(pos=#@content)
 			table.remove(@content, pos)
-			if @selected >= pos and @selected > 1 then
+			if @selected > pos and @selected > 1 then
 				@selected -= 1
 			end
+			@selected = math.min(@selected, #@content)
+			@_redraw = true
+		end,
+		replace = :(pos, item)
+			@content[pos] = item
 			@_redraw = true
 		end,
 		clear = :()
-			@.content = {}
-			--@.columnWidth = {}
+			@content = {}
+			@columnWidth = {}
 			@_redraw = true
 			@selected = 1
 			@scroll = 0
@@ -419,10 +443,16 @@ return (ui)
 							control = "up"
 						elseif k == "[B" then
 							control = "down"
+						elseif k == "[5" then
+							control = "pgup"
+						elseif k == "[6" then
+							control = "pgdown"
 						elseif k == "[3" then
 							k ..= string.char(screen:getch())
 							if k == "[3~" then
 								control = "delete"
+							elseif k == "[3;" then
+								control = "clear"
 							else
 								error("unknown control "..tostring(k))
 							end
