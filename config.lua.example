@@ -1,0 +1,12 @@
+-- Copy this file into config.lua and change according to your tastes.
+
+-- MPD server
+host = "localhost"
+port = 6600
+password = "" -- leave empty if you don't use a password
+
+-- Default behaviour
+filenameSearch = false -- instant search search also search in filenames (not only when using the file= syntax), slower
+
+-- Interface
+songDisplay = { "Track", { "Title", "file" }, "Artist", "Album" } -- list of tags or list of alternative tags (first one to exist will be used) to display for each song

@@ -36,6 +36,9 @@
 -- * The endgoal would be that playlists would be entirely determined and contained in a single search query (add some saved storage interface).
 --   Which we would therfore mean we can regenerate them on the fly when the MPD database is updated, or probabilities where used in the query.
 -- * A non-console GUI. Should be doable considering everything is neatly contained in gui.can, but damn are thoses text widget I made weird.
+-- * A real documentation.
+-- * Tag!=thing, modified since, and, not, or
+-- * File browser
 --
 -- This version of the software is licensed under the terms of the Apache License, version 2 (https://www.apache.org/licenses/LICENSE-2.0.txt).
 
@@ -58,20 +61,23 @@ let gui = require("gui")
 let mpc = require("mpc")
 
 -- Constants
-let VERSION = "0.0.3"
+let VERSION = "0.0.4" -- Major.Minor.IdkIChangedSomethingButLetsNotTalkAboutItTooMuch
+-- Major bump means that everything major that was planned before I decided to keep programming this shit was implemented, and forms, like, a cohesive whole.
+-- Minor bump means I implemented something that's actually useful. Stuff may break, because why not.
+-- The other thing bump means I implemented or fixed something. But that's not worth excitement.
 
--- Configuration
+-- Configuration file. Yeah.
 let config = {
 	-- MPD server
 	host = "localhost",
 	port = 6600,
-	password = "",
+	password = "", -- leave empty if you don't use a password
 	-- Default behaviour
-	filenameSearch = false, -- instant search search also in filename (not only when using the file= syntax), slower
+	filenameSearch = false, -- instant search search also search in filenames (not only when using the file= syntax), slower
 	-- Interface
 	songDisplay = { "Track", { "Title", "file" }, "Artist", "Album" } -- list of tags or list of alternative tags (first one to exist will be used) to display for each song
 }
-(loadfile("config.lua", "t", config) or () end)()
+(loadfile("config.lua", "t", config) or () end)() -- GATHER UP EVERYONE! I WANT YOU TO MEET... THE AMAZING CONFIG FILE LOADER!
 
 -- Returns list of fields to display for the song s
 let songTable = (s)
@@ -89,7 +95,7 @@ let songTable = (s)
 	return t
 end
 
--- Connect
+-- Connect!
 mpc.log = () end
 mpc = mpc(config.host, config.port)
 if config.password ~= "" then
@@ -106,13 +112,13 @@ let tags = [
 
 -- State
 let tagCompleting = {
-	tag = nil,
-	start = nil,
-	stop = nil
+	tag = nil, -- tag name
+	start = nil, -- start position in search input for tag=thing
+	stop = nil -- end position
 }
 
-let results, playlist = {}, {}
-let state = "stop"
+let results, playlist = {}, {} -- current result in the search view / playlist (list of songs)
+let state = "stop" -- state
 
 gui {
 		{
@@ -146,7 +152,7 @@ gui {
 							else
 								start, sel, val, stop = @sub(1, @cursorPosition):match("()([A-Za-z_]+)=\"([^\"]*)()$")
 							end
-
+							-- TODO: candran "str":thing
 							-- music tags
 							for _, tag in ipairs(tags) do
 								if tag:lower() == sel:lower() then
@@ -168,16 +174,15 @@ gui {
 									break
 								end
 							end
+
 							-- file search
 							if sel:lower() == "file" then
-								let r, songs = mpc:list("file")
+								let r, songs = mpc:search(("(file == %q)"):format(val), "window", "0:"..tostring(list.h))
 								if r then
 									results = {}
 									for _, s in ipairs(songs) do
-										if s.file:lower():match(val:lower()) then -- filter val
-											table.insert(results, s)
-											list:insert{tostring(s.file)}
-										end
+										table.insert(results, s)
+										list:insert{tostring(s.file)}
 									end
 								end
 
@@ -193,19 +198,20 @@ gui {
 							-- Any selectors
 							let withoutSel = @content:gsub("[A-Za-z_]+=[^\" ]+", ""):gsub("[A-Za-z_]+=\"[^\"]*\"", "")
 							for word in withoutSel:gmatch("[^%s]+") do
-								table.insert(query, "any")
-								table.insert(query, word)
+								table.insert(query, ("(any == %q)"):format(word))
 							end
 
 							-- Tag selectors
 							for tag, val in @content:gmatch("([A-Za-z_]+)=([^\" ]+)") do
-								table.insert(query, tag)
-								table.insert(query, val)
+								table.insert(query, ("(%s == %q)"):format(tag, val))
 							end
 							for tag, val in @content:gmatch("([A-Za-z_]+)=\"([^\"]*)\"") do
-								table.insert(query, tag)
-								table.insert(query, val)
+								table.insert(query, ("(%s == %q)"):format(tag, val))
 							end
+
+							-- Limit
+							table.insert(query, "window")
+							table.insert(query, "0:"..tostring(list.h))
 
 							-- Search
 							let r, songs = mpc:search(unpack(query))
@@ -213,16 +219,14 @@ gui {
 
 							-- Filename search
 							if config.filenameSearch then
-								for i=1, #query, 2 do
-									if query[i] == "any" then
-										query[i] = "file"
-									end
+								for i=1, #query, 1 do
+									query[i] = query[i]:gsub("^%(any", "(file")
 								end
 
 								let r, songs = mpc:search(unpack(query))
 								if r then
 									-- Merge
-									for _, newSong in ipairs(songs) do
+									for _, newSong in ipairs(songs) do -- TODO more efficient (using a sorted thing)
 										let found = false
 										for _, existingSong in ipairs(results) do
 											if newSong.file == existingSong.file then
