@@ -73,9 +73,9 @@ let config = {
 	port = 6600,
 	password = "", -- leave empty if you don't use a password
 	-- Default behaviour
-	filenameSearch = false, -- instant search search also search in filenames (not only when using the file= syntax), slower
+	filenameSearch = true, -- instant search search also search in filenames for untitled tracks (not only when using the file= syntax), slightly slower when handling large searches
 	-- Interface
-	songDisplay = { "Track", { "Title", "file" }, "Artist", "Album" } -- list of tags or list of alternative tags (first one to exist will be used) to display for each song
+	songDisplay = { "Track", { "Title", "Name", "file" }, "Artist", "Album" } -- list of tags or list of alternative tags (first one to exist will be used) to display for each song
 }
 (loadfile("config.lua", "t", config) or () end)() -- GATHER UP EVERYONE! I WANT YOU TO MEET... THE AMAZING CONFIG FILE LOADER!
 
@@ -152,13 +152,14 @@ gui {
 							else
 								start, sel, val, stop = @sub(1, @cursorPosition):match("()([A-Za-z_]+)=\"([^\"]*)()$")
 							end
-							-- TODO: candran "str":thing
+
 							-- music tags
 							for _, tag in ipairs(tags) do
 								if tag:lower() == sel:lower() then
+									results = {}
+
 									let r, songs = mpc:list(tag)
 									if r then
-										results = {}
 										for _, s in ipairs(songs) do
 											if s[tag]:lower():match(val:lower()) then -- filter val
 												table.insert(results, s)
@@ -177,14 +178,17 @@ gui {
 
 							-- file search
 							if sel:lower() == "file" then
-								let r, songs = mpc:search(("(file == %q)"):format(val), "window", "0:"..tostring(list.h))
-								if r then
-									results = {}
-									for _, s in ipairs(songs) do
-										table.insert(results, s)
-										list:insert{tostring(s.file)}
+								results = {}
+
+								list:setPump(10, :(start, stop)
+									let r, songs = mpc:search("(file == %q)":format(val), "window", "%s:%s":format(start-1, stop))
+									if r then
+										for _, s in ipairs(songs) do
+											table.insert(results, s)
+											list:insert{tostring(s.file)}
+										end
 									end
-								end
+								end)
 
 								tagCompleting.tag = "file"
 								tagCompleting.start = start
@@ -192,59 +196,85 @@ gui {
 							end
 						-- Song search
 						else
+							results = {
+								_filenameSearchOffset = 0, -- where the filename search begin in the result list
+								_filenameSearchStart = 0 -- where the search window should start in the filename search
+							}
+
 							-- Build query
 							let query = {}
 
 							-- Any selectors
 							let withoutSel = @content:gsub("[A-Za-z_]+=[^\" ]+", ""):gsub("[A-Za-z_]+=\"[^\"]*\"", "")
 							for word in withoutSel:gmatch("[^%s]+") do
-								table.insert(query, ("(any == %q)"):format(word))
+								table.insert(query, "(any == %q)":format(word))
 							end
 
 							-- Tag selectors
 							for tag, val in @content:gmatch("([A-Za-z_]+)=([^\" ]+)") do
-								table.insert(query, ("(%s == %q)"):format(tag, val))
+								table.insert(query, "(%s == %q)":format(tag, val))
 							end
 							for tag, val in @content:gmatch("([A-Za-z_]+)=\"([^\"]*)\"") do
-								table.insert(query, ("(%s == %q)"):format(tag, val))
+								table.insert(query, "(%s == %q)":format(tag, val))
 							end
 
 							-- Limit
 							table.insert(query, "window")
-							table.insert(query, "0:"..tostring(list.h))
+							table.insert(query, "0:0")
 
-							-- Search
-							let r, songs = mpc:search(unpack(query))
-							if r then results = songs end
+							-- And they pumped...
+							list:setPump(10, :(start, stop)
+								let filenameSearchStop -- where the filename search window should end
 
-							-- Filename search
-							if config.filenameSearch then
-								for i=1, #query, 1 do
-									query[i] = query[i]:gsub("^%(any", "(file")
-								end
+								-- only search if didn't reache filename search
+								if results._filenameSearchStart == 0 then
+									-- Update limit
+									query[#query] = "%s:%s":format(start-1, stop)
 
-								let r, songs = mpc:search(unpack(query))
-								if r then
-									-- Merge
-									for _, newSong in ipairs(songs) do -- TODO more efficient (using a sorted thing)
-										let found = false
-										for _, existingSong in ipairs(results) do
-											if newSong.file == existingSong.file then
-												found = true
-												break
-											end
+									-- Search
+									let r, songs = mpc:search(unpack(query))
+									if r then
+										-- Update widget
+										for _, s in ipairs(songs) do
+											table.insert(results, songs)
+											@insert(songTable(s))
 										end
-										if not found then
-											table.insert(results, newSong)
+
+										-- Fill what's left with filename search
+										if config.filenameSearch and #results < stop then
+											results._filenameSearchOffset = #results
+											filenameSearchStop = stop-results._filenameSearchOffset+results._filenameSearchStart
 										end
 									end
+								else
+									filenameSearchStop = stop-results._filenameSearchOffset+results._filenameSearchStart
 								end
-							end
 
-							-- Update widget
-							for _, s in ipairs(results) do
-								list:insert(songTable(s))
-							end
+								-- Filename search
+								if filenameSearchStop then
+									for i=1, #query-2, 1 do
+										query[i] = query[i]:gsub("^%(any", "(file")
+									end
+
+									-- Loop to fill as much as possible (since we skip tracks with a title)
+									repeat
+										query[#query] = "%s:%s":format(results._filenameSearchStart, filenameSearchStop)
+										results._filenameSearchStart = filenameSearchStop
+
+										let r, songs = mpc:search(unpack(query))
+										if r then
+											for _, newSong in ipairs(songs) do
+												if not newSong.Title then
+													table.insert(results, newSong)
+													@insert(songTable(newSong))
+												end
+											end
+										end
+
+										filenameSearchStop = stop-results._filenameSearchOffset+results._filenameSearchStart
+									until filenameSearchStop == results._filenameSearchStart or #songs == 0
+								end
+							end)
 						end
 					end
 				},
@@ -303,26 +333,33 @@ gui {
 
 					updateInterval = 5,
 
-					onUpdate = :()
-						let r, songs = mpc:playlistinfo()
-						if r then playlist = songs end
-
-						for i, s in ipairs(playlist) do
-							let item = songTable(s)
-							if @content[i] then
-								@replace(i, item)
-							else
-								@insert(i, item)
+					pump = :(start, stop)
+						let r, songs = mpc:playlistinfo("%s:%s":format(start-1, stop))
+						if r then
+							for i=1, stop-start+1, 1 do
+								if songs[i] then
+									playlist[start+i-1] = songs[i]
+									let item = songTable(songs[i])
+									if @content[start+i-1] then
+										@replace(start+i-1, item)
+									else
+										@insert(start+i-1, item)
+									end
+								else
+									playlist[start+i-1] = 0
+									@remove(start+i-1)
+									start -= 1
+								end
 							end
-						end
-
-						while #@content > #playlist do
-							@remove()
 						end
 					end,
 
+					onUpdate = :()
+						@repump()
+					end,
+
 					onSelect = :(l)
-						if #playlist > 0 then
+						if playlist[l[1]] then
 							mpc:playid(playlist[l[1]].Id)
 						end
 					end,

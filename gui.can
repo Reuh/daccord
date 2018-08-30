@@ -26,21 +26,17 @@ os.setlocale("")
 let everyWidget = {}
 
 let widget = class {
-	_exit = false,
+	id = nil, -- (optional) widget id
+	type = nil, -- widget type
 
-	_redraw = true,
-	x = 0,
-	y = 0,
-	w = 0,
-	h = 0,
+	width = nil, -- height
+	height = nil, -- width
 
-	parent = {},
-	focused = false,
+	focused = false, -- true if take inputs
 
-	updateInterval = -1,
-	_nextUpdate = os.time(), -- -1 = no update
+	updateInterval = -1, -- time in seconds between updates
 
-	new = :(data)
+	new = :(data) -- create a new widget
 		table.insert(everyWidget, self)
 
 		-- Copy properties
@@ -49,60 +45,74 @@ let widget = class {
 		end
 
 		-- Dimensions
-		if not @parent._firstX then @parent._firstX, @parent._firstY = 0, 0 end
-		@x, @y = @parent._firstX, @parent._firstY
+		if not @_parent._firstX then @_parent._firstX, @_parent._firstY = 0, 0 end
+		@_x, @_y = @_parent._firstX, @_parent._firstY
 
-		if     @width == "extend" @w = @parent.w - @x
-		elseif @width:match("%d+em$") @w = tonumber(@width:match("%d+"))
+		if     @width == "extend" @_w = @_parent._w - @_x
+		elseif @width:match("%d+em$") @_w = tonumber(@width:match("%d+"))
 		if     @height == "extend" then
-			@h = @parent.h - @y
-			@parent._lastVerticalExtend = self -- will be resized if vertical space is needed
-			@parent._afterLastVerticalExtend = {}
-		elseif @height:match("%d+em$") @h = tonumber(@height:match("%d+"))
+			@_h = @_parent._h - @_y
+			@_parent._lastVerticalExtend = self -- will be resized if vertical space is needed
+			@_parent._afterLastVerticalExtend = {}
+		elseif @height:match("%d+em$") @_h = tonumber(@height:match("%d+"))
 
-		if @y >= @parent.h then -- resize
-			@parent._lastVerticalExtend:_resize(@parent._lastVerticalExtend.w, @parent._lastVerticalExtend.h - @h)
-			@parent._firstY -= @h
-			@y -= @h
-			for _, el in ipairs(@parent._afterLastVerticalExtend) do -- move widgets
-				el.y -= @h
+		if @_y >= @_parent._h then -- resize
+			@_parent._lastVerticalExtend:_resize(@_parent._lastVerticalExtend._w, @_parent._lastVerticalExtend._h - @_h)
+			@_parent._firstY -= @_h
+			@_y -= @_h
+			for _, el in ipairs(@_parent._afterLastVerticalExtend) do -- move widgets
+				el._y -= @_h
 			end
 		end
 
-		@parent._firstX += @w
-		if @parent._firstX >= @parent.w then @parent._firstX = 0 end -- newline
-		@parent._firstY += @h
-		if @parent._lastVerticalExtend ~= self and @parent._afterLastVerticalExtend then table.insert(@parent._afterLastVerticalExtend, self) end
+		@_parent._firstX += @_w
+		if @_parent._firstX >= @_parent._w then @_parent._firstX = 0 end -- newline
+		@_parent._firstY += @_h
+		if @_parent._lastVerticalExtend ~= self and @_parent._afterLastVerticalExtend then table.insert(@_parent._afterLastVerticalExtend, self) end
 
 		-- Setup
 		if @_setup then @_setup() end
 
-		screen:move(@parent.y + @y + @h, @parent.x + @x + @w)
+		screen:move(@_parent._y + @_y + @_h, @_parent._x + @_x + @_w)
 	end,
 
-	exit = :()
+	exit = :() -- exit the application
 		@_exit = true
 	end,
 
-	byId = :(id)
+	byId = :(id) -- return a widget by its id
 		for _, el in ipairs(everyWidget) do
 			if el.id == id return el
 		end
 		error("no element with id "..tostring(id))
 	end,
 
-	updateAfter = :(time)
+	updateAfter = :(time) -- reschedule the next widget update
 		@_nextUpdate = os.time() + time
-	end
+	end,
+
+	_parent = {},
+
+	_exit = false,
+
+	_redraw = true,
+	_x = 0,
+	_y = 0,
+	_w = 0,
+	_h = 0,
+
+	_nextUpdate = os.time(), -- -1 = no update
 }
 
 let widgets = setmetatable({
 	fill = widget {
+		fill = nil, -- filling type
+
 		_draw = :()
 			if type(@fill) == "string" then @fill = curses[@fill] end
-			for y = @parent.y + @y, @parent.y + @y + @h - 1 do
-				screen:move(y, @parent.x + @x)
-				for x = @parent.x + @x, @parent.x + @x + @w - 1 do
+			for y = @_parent._y + @_y, @_parent._y + @_y + @_h - 1 do
+				screen:move(y, @_parent._x + @_x)
+				for x = @_parent._x + @_x, @_parent._x + @_x + @_w - 1 do
 					screen:addch(@fill or 32)
 				end
 			end
@@ -110,10 +120,27 @@ let widgets = setmetatable({
 	},
 
 	input = widget {
-		content = "",
-		cursorPosition = 1,
+		content = "", -- text content
+		cursorPosition = 1, -- cursor position, first character is 1
+		sub = :(start, stop=utf8.len(@content)) -- get the substring
+			if stop < 1 or start >= utf8.len(@content) then
+				return ""
+			else
+				return @content:sub(utf8.offset(@content, start), (utf8.offset(@content, stop+1) or (#@content+1))-1)
+			end
+		end,
+		replace = :(start, stop, newText) -- replace a substring
+			if @cursorPosition >= stop then
+				@cursorPosition += utf8.len(newText) - (stop - start)
+			end
+			@content = @sub(1, start-1) .. newText .. @sub(stop+1)
+			@onTextInput()
+			@_redraw = true
+		end,
+		onTextInput = :() end, -- called when the text change
+
 		_input = :(charbuffer, control)
-			let y, x = @parent.y + @y, @parent.x + @x + @cursorPosition-1
+			let y, x = @_parent._y + @_y, @_parent._x + @_x + @cursorPosition-1
 			if control == "backspace" then
 				screen:mvdelch(y, x-1)
 				if @cursorPosition > 1 then
@@ -159,41 +186,108 @@ let widgets = setmetatable({
 			end
 		end,
 		_draw = :()
-			for y = @parent.y + @y, @parent.y + @y + @h - 1 do
-				screen:move(y, @parent.x + @x)
-				for x = @parent.x + @x, @parent.x + @x + @w - 1 do
+			for y = @_parent._y + @_y, @_parent._y + @_y + @_h - 1 do
+				screen:move(y, @_parent._x + @_x)
+				for x = @_parent._x + @_x, @_parent._x + @_x + @_w - 1 do
 					screen:addch(32)
 				end
 			end
-			screen:mvaddstr(@parent.y + @y, @parent.x + @x, @content)
+			screen:mvaddstr(@_parent._y + @_y, @_parent._x + @_x, @content)
 		end,
 		_placeCursor = :()
-			screen:move(@parent.y + @y, @parent.x + @x + @cursorPosition-1)
+			screen:move(@_parent._y + @_y, @_parent._x + @_x + @cursorPosition-1)
 			return true
-		end,
-		sub = :(start, stop=utf8.len(@content))
-			if stop < 1 or start >= utf8.len(@content) then
-				return ""
-			else
-				return @content:sub(utf8.offset(@content, start), (utf8.offset(@content, stop+1) or (#@content+1))-1)
-			end
-		end,
-		replace = :(start, stop, newText)
-			if @cursorPosition >= stop then
-				@cursorPosition += utf8.len(newText) - (stop - start)
-			end
-			@content = @sub(1, start-1) .. newText .. @sub(stop+1)
-			@onTextInput()
-			@_redraw = true
-		end,
-		onTextInput = :() end
+		end
 	},
 
 	list = widget {
-		content = {},
-		columnWidth = {},
-		selected = 1,
-		scroll = 0,
+		content = {}, -- list content (list of tables)
+		selected = 1, -- last selected line
+		pump = nil, -- function used to pump. See :setPump().
+		insert = :(pos, item) -- insert a line, shifting elements after it
+			if item then
+				table.insert(@content, pos, item)
+				if @selected > pos and @selected < #@content then
+					@selected += 1
+				end
+			else
+				item = pos
+				table.insert(@content, item)
+			end
+			if #@content == 1 then -- column count is determined by 1st item (other items can do what they want, this isn't a dictatorship)
+				@_columnWidth = [for _=1,#item do 0 end]
+			end
+			if #item >= #@_columnWidth then -- if the column fits into our dictatorship, update column width
+				for c=1, #@_columnWidth do
+					let l = utf8.len(item[c]) -- if it isn't valid UTF8, ignore (can happen for files in Windows-made zipfiles). Should probably raise a warning or something... TODO.
+					if l and l > @_columnWidth[c] then
+						@_columnWidth[c] = utf8.len(item[c]) + 1
+					end
+				end
+			end
+			@_redraw = true
+		end,
+		remove = :(pos=#@content) -- remove a line, shifting elements after it
+			table.remove(@content, pos)
+			if @selected > pos and @selected > 1 then
+				@selected -= 1
+			end
+			@selected = math.min(@selected, #@content)
+			@_redraw = true
+		end,
+		replace = :(pos, item) -- replace a line
+			@content[pos] = item
+			if #@content == 1 then -- column count is determined by 1st item (other items can do what they want, this isn't a dictatorship)
+				@_columnWidth = [for _=1,#item do 0 end]
+			end
+			if #item >= #@_columnWidth then -- if the column fits into our dictatorship, update column width
+				for c=1, #@_columnWidth do
+					let l = utf8.len(item[c]) -- if it isn't valid UTF8, ignore (can happen for files in Windows-made zipfiles). Should probably raise a warning or something... TODO.
+					if l and l > @_columnWidth[c] then
+						@_columnWidth[c] = utf8.len(item[c]) + 1
+					end
+				end
+			end
+			@_redraw = true
+		end,
+		-- Give a pump function (startPosition, stopPosition) -> {tables...} which load the lines between startPosition and stopPosition.
+		-- The pump may returns the lines instead of inserting them itself.
+		-- step is the preferance of number of line to be loaded at one.
+		setPump = :(step, newPump)
+			@pump = newPump
+			@_pumpStep = step
+			if #@content == 0 then
+				let pumped = @pump(1, math.max(@_h, @_pumpStep))
+				if pumped then
+					for _, l in ipairs(pumped) do
+						@insert(l)
+					end
+				end
+			end
+		end,
+		repump = :() -- force already pumped elements to be repumped. The rest of the list state will be kept.
+			@content = {}
+			@_columnWidth = {}
+			let pumped = @pump(1, math.max(@_scroll+@_h, @_scroll+@_pumpStep)) -- TODO: change everything so we only need to pump what is currently displayed
+			if pumped then
+				for i, l in ipairs(pumped) do
+					@replace(@_scroll+i-1, l)
+				end
+			end
+		end,
+		clear = :() -- reset list: content, current selection, current pump
+			@content = {}
+			@_columnWidth = {}
+			@_redraw = true
+			@selected = 1
+			@_scroll = 0
+			@pump = nil
+		end,
+		onSelect = :() end, -- called when selecting a line
+
+		_columnWidth = {},
+		_scroll = 0,
+		_pumpStep = 5,
 		_redraw = true,
 		_input = :(charbuffer, control)
 			if control == "up" then
@@ -209,13 +303,23 @@ let widgets = setmetatable({
 				@selected += 10
 				@_redraw = true
 			end
+
+			if @pump and @selected > #@content then -- pump data if needed
+				let pumped = @pump(#@content+1, #@content+@_pumpStep+1)
+				if pumped then
+					for _, l in ipairs(pumped) do
+						@insert(l)
+					end
+				end
+			end
+
 			@selected = math.min(math.max(@selected, 1), math.max(#@content, 1))
 
-			while @selected <= @scroll do
-				@scroll -= 1
+			while @selected <= @_scroll do
+				@_scroll -= 1
 			end
-			while @selected >= @scroll + @h + 1 do
-				@scroll += 1
+			while @selected >= @_scroll + @_h + 1 do
+				@_scroll += 1
 			end
 
 			if control == "enter" then
@@ -227,79 +331,37 @@ let widgets = setmetatable({
 		end,
 		_draw = :()
 			let oY, oX = screen:getyx()
-			for y = @parent.y + @y, @parent.y + @y + @h -1 do -- clear
-				screen:mvaddstr(y, @parent.x + @x, (" "):rep(@w))
+			for y = @_parent._y + @_y, @_parent._y + @_y + @_h -1 do -- clear
+				screen:mvaddstr(y, @_parent._x + @_x, (" "):rep(@_w))
 			end
-			screen:move(@parent.y + @y, @parent.x + @x)
-			for i=@scroll+1, @scroll + @h do -- draw
+			screen:move(@_parent._y + @_y, @_parent._x + @_x)
+			for i=@_scroll+1, @_scroll + @_h do -- draw
 				if i == @selected then
 					screen:standout()
 				end
-				let colx = @parent.x+@x
-				for c=1, #@columnWidth do
-					screen:mvaddstr(@parent.y+@y+i-1-@scroll, colx, @content[i] and @content[i][c] or "") -- TODO: make sure it doesn't go too far right or something
-					colx += @columnWidth[c]
+				let colx = @_parent._x+@_x
+				for c=1, #@_columnWidth do
+					screen:mvaddstr(@_parent._y+@_y+i-1-@_scroll, colx, @content[i] and @content[i][c] or "") -- TODO: make sure it doesn't go too far right or something
+					colx += @_columnWidth[c]
 				end
 				if i == @selected then
 					screen:standend()
 				end
 			end
 			screen:move(oY, oX)
-		end,
-		insert = :(pos, item)
-			if item then
-				table.insert(@content, pos, item)
-				if @selected > pos and @selected < #@content then
-					@selected += 1
-				end
-			else
-				item = pos
-				table.insert(@content, item)
-			end
-			if #@content == 1 then -- column count is determined by 1st item (other items can do what they want, this isn't a dictatorship)
-				@columnWidth = [for _=1,#item do 0 end]
-			end
-			if #item >= #@columnWidth then -- if the column fits into our dictatorship, update column width
-				for c=1, #@columnWidth do
-					let l = utf8.len(item[c]) -- if it isn't valid UTF8, ignore (can happen for files in Windows-made zipfiles). Should probably raise a warning or something... TODO.
-					if l and l > @columnWidth[c] then
-						@columnWidth[c] = utf8.len(item[c]) + 1
-					end
-				end
-			end
-			@_redraw = true
-		end,
-		remove = :(pos=#@content)
-			table.remove(@content, pos)
-			if @selected > pos and @selected > 1 then
-				@selected -= 1
-			end
-			@selected = math.min(@selected, #@content)
-			@_redraw = true
-		end,
-		replace = :(pos, item)
-			@content[pos] = item
-			@_redraw = true
-		end,
-		clear = :()
-			@content = {}
-			@columnWidth = {}
-			@_redraw = true
-			@selected = 1
-			@scroll = 0
-		end,
-		onSelect = :() end
+		end
 	},
 
 	tabs = widget {
-		selected = 1,
-		children = {},
+		selected = 1, -- selected tab
+		children = {}, -- children elements
+
 		_children = {},
 		_setup = :()
 			for i, tab in ipairs(@) do
-				@children[i] = { x = @x, y = @y, w = @w, h = @h }
+				@children[i] = { _x = @_x, _y = @_y, _w = @_w, _h = @_h }
 				for _, el in ipairs(tab) do
-					el.parent = @children[i]
+					el._parent = @children[i]
 					table.insert(@children[i], widgets[el.type]:new(el))
 				end
 			end
@@ -316,53 +378,55 @@ let widgets = setmetatable({
 			end
 		end,
 		_resize = :(w, h)
-			@w, @h = w, h
+			@_w, @_h = w, h
 			for i, tab in ipairs(@) do
 				for _, el in ipairs(@children[i]) do
-					if el.x + el.w > w then el.w = w - el.x end
-					if el.y + el.h > h then el.h = h - el.y end
+					if el._x + el._w > w then el._w = w - el._x end
+					if el._y + el._h > h then el._h = h - el._y end
 				end
 			end
 		end
 	},
 
 	label = widget {
-		content = "Label",
-		_draw = :()
-			screen:mvaddstr(@parent.y + @y, @parent.x + @x, @content .. (" "):rep(@w - #@content))
-		end,
-		set = :(str)
+		content = "Label", -- text
+		set = :(str) -- set text
 			@content = str
 			@_redraw = true
+		end,
+
+		_draw = :()
+			screen:mvaddstr(@_parent._y + @_y, @_parent._x + @_x, @content .. (" "):rep(@_w - #@content))
 		end
 	},
 
 	slider = widget {
-		min = 0,
-		max = 1,
-		current = 0,
-		head = "⏸",
-		_draw = :()
-			let len = math.ceil((@current - @min) / (@max - @min) * @w)
-			screen:mvaddstr(@parent.y + @y, @parent.x + @x, ("="):rep(len-1))
-			screen:addstr(@head .. (" "):rep(@w - len))
-		end,
-		set = :(current)
-			@current = current
+		min = 0, -- min value
+		max = 1, -- max value
+		value = 0, -- current value
+		head = "⏸", -- associated symbol
+		set = :(value) -- change value
+			@value = value
 			@_redraw = true
 		end,
-		setMax = :(max)
+		setMax = :(max) -- change maximum
 			@max = max
 			@_redraw = true
 		end,
-		setMin = :(min)
+		setMin = :(min) -- change minimum
 			@min = min
 			@_redraw = true
 		end,
-		setHead = :(head)
+		setHead = :(head) -- change symbol
 			@head = head
 			@_redraw = true
-		end
+		end,
+
+		_draw = :()
+			let len = math.ceil((@value - @min) / (@max - @min) * @_w)
+			screen:mvaddstr(@_parent._y + @_y, @_parent._x + @_x, ("="):rep(len-1))
+			screen:addstr(@head .. (" "):rep(@_w - len))
+		end,
 	}
 }, {
 	__index = (t, k)
@@ -396,11 +460,11 @@ return (ui)
 		screen:clear()
 		let h, w = screen:getmaxyx()
 		let parent = {
-			x = 0, y = 0,
-			w = w, h = h
+			_x = 0, _y = 0,
+			_w = w, _h = h
 		}
 		for _, el in ipairs(ui) do
-			el.parent = parent
+			el._parent = parent
 			el._widget = widgets[el.type]:new(el)
 		end
 
@@ -444,9 +508,19 @@ return (ui)
 						elseif k == "[B" then
 							control = "down"
 						elseif k == "[5" then
-							control = "pgup"
+							k ..= string.char(screen:getch())
+							if k == "[5~" then
+								control = "pgup"
+							else
+								error("unknown control "..tostring(k))
+							end
 						elseif k == "[6" then
-							control = "pgdown"
+							k ..= string.char(screen:getch())
+							if k == "[6~" then
+								control = "pgdown"
+							else
+								error("unknown control "..tostring(k))
+							end
 						elseif k == "[3" then
 							k ..= string.char(screen:getch())
 							if k == "[3~" then
